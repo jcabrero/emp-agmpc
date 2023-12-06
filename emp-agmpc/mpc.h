@@ -55,6 +55,8 @@ class CMPC { public:
 		}
 		num_in = cf->n1+cf->n2;
 		total_pre = num_in + num_ands + 3*ssp;
+
+		// FPRE(1): Extracting the lambda from the ABit
 		fpre = new FpreMP<nP>(io, pool, party, _delta, ssp);
 		Delta = fpre->Delta;
 
@@ -69,8 +71,8 @@ class CMPC { public:
 		for(int i  = 1; i <= nP; ++i) {
 			key[i] = new block[cf->num_wire];
 			mac[i] = new block[cf->num_wire];
-			ANDS_key[i] = new block[num_ands*3];
-			ANDS_mac[i] = new block[num_ands*3];
+			ANDS_key[i] = new block[num_ands*3]; // For some reason, it reserves 3 * num_ands, but uses only num_ands
+			ANDS_mac[i] = new block[num_ands*3]; // For some reason, it reserves 3 * num_ands, but uses only num_ands
 			preprocess_mac[i] = new block[total_pre];
 			preprocess_key[i] = new block[total_pre];
 			sigma_mac[i] = new block[num_ands];
@@ -78,7 +80,7 @@ class CMPC { public:
 			eval_labels[i] = new block[cf->num_wire];
 		}
 		value = new bool[cf->num_wire];
-		ANDS_value = new bool[num_ands*3];
+		ANDS_value = new bool[num_ands*3]; // For some reason, it reserves 3 * num_ands, but uses only num_ands
 		preprocess_value = new bool[total_pre];
 		sigma_value = new bool[num_ands];
 	}
@@ -110,12 +112,20 @@ class CMPC { public:
 	PRG prg;
 
 	void function_independent() {
+		// This is the assignation of the random labels to the wires
 		if(party != 1)
 			prg.random_block(labels, cf->num_wire);
 
-		fpre->compute(ANDS_mac, ANDS_key, ANDS_value, num_ands);
+
+		// FPRE(2): On W, output wires of AND gates.
+		/* On the AND_mac we get the M_j[r^i], on ANDS_key we get  K_i[r^j] and in ANDS_value we get r^i_w (a share)*/
+		// THIS MAY BE AN ERROR
+		fpre->compute(ANDS_mac, ANDS_key, ANDS_value, 3*num_ands);
 
 		prg.random_bool(preprocess_value, total_pre);
+
+		// FPRE(2): On I, input wires.
+		/* On the preprocess_mac we get the M_j[r^i], on preprocess_key we get  K_i[r^j] and in preprocess_value we get r^i_w (a share)*/
 		fpre->abit->compute(preprocess_mac, preprocess_key, preprocess_value, total_pre);
 		auto ret = fpre->abit->check(preprocess_mac, preprocess_key, preprocess_value, total_pre);
 		ret.get();
@@ -133,27 +143,48 @@ class CMPC { public:
 	}
 
 	void function_dependent() {
+
 		int ands = num_in;
 		bool * x[nP+1];
 		bool * y[nP+1];
+		// Initializing structure
 		for(int i = 1; i <= nP; ++i) {
 			x[i] = new bool[num_ands];
 			y[i] = new bool[num_ands];
 		}
-
+		// THE TWO LOOPS BELOW IN LINE 157 and 179 can be combined in one and PARALLELIZED.
+		// For each AND GATE:
 		for(int i = 0; i < cf->num_gate; ++i) {
-			if (cf->gates[4*i+3] == AND_GATE) {
+			// HIGHLY PARALLELIZABLE
+			if (cf->gates[4*i+3] == AND_GATE) { // [3] refers to the kind of gate we are dealing with
+				// For each party:
+				// HIGHLY PARALLELIZABLE
 				for(int j = 1; j <= nP; ++j) {
+					// Technically, it is storing the AND preprocessing key and mac into the corresponding entry.
+					// The 4 * i + 2 comes from being a vector of integers, and being multiples of 4 the gates.
+					// The entry is stored on the [2] entry.
+					// The second entry refers to the Output Gate in the tuple
+
+					// It is storing the Keys and Macs of the parties for the AND gates
 					key[j][cf->gates[4*i+2]] = preprocess_key[j][ands];
 					mac[j][cf->gates[4*i+2]] = preprocess_mac[j][ands];
 				}
+
+				// Here, it extracts the value of the r_i share for the and gates.
 				value[cf->gates[4*i+2]] = preprocess_value[ands];
 				++ands;
 			}
 		}
 
+		// For the XOR and NOT gates
 		for(int i = 0; i < cf->num_gate; ++i) {
 			if (cf->gates[4*i+3] == XOR_GATE) {
+				// For the rest of the parties that authenticated us, we can produce directly the output.
+				// First: It produces the output Keys for all the remaining parties.
+				// Second: It produces the output MACS for all the remaining parties.
+				// Third: It computes the output values of the permutations.
+				// Fourth: It produces the output label for the gates not being 
+				// HIGHLY PARALLELIZABLE
 				for(int j = 1; j <= nP; ++j) {
 					key[j][cf->gates[4*i+2]] = key[j][cf->gates[4*i]] ^ key[j][cf->gates[4*i+1]];
 					mac[j][cf->gates[4*i+2]] = mac[j][cf->gates[4*i]] ^ mac[j][cf->gates[4*i+1]];
@@ -162,8 +193,17 @@ class CMPC { public:
 				if(party != 1)
 					labels[cf->gates[4*i+2]] = labels[cf->gates[4*i]] ^ labels[cf->gates[4*i+1]];
 			} else if (cf->gates[4*i+3] == NOT_GATE) {
+				// For the NOT gate, we produce a key where
+				// First: It produces the output Keys for all the remaining parties.
+				// Should be key[j][cf->gates[4*i] ^ DELTA]
+				// Second: It produces the output MACS for all the remaining parties.
+				// Third: It computes the output values of the permutations.
+				// The value of the permutation for the NOT gate should be value
+				// Fourth: The value for the gate should be:
+				// value = value ^ 1
+				// HIGHLY PARALLELIZABLE
 				for(int j = 1; j <= nP; ++j) {
-					key[j][cf->gates[4*i+2]] = key[j][cf->gates[4*i]];
+					key[j][cf->gates[4*i+2]] = key[j][cf->gates[4*i]]; 
 					mac[j][cf->gates[4*i+2]] = mac[j][cf->gates[4*i]];
 				}
 				value[cf->gates[4*i+2]] = value[cf->gates[4*i]];
@@ -176,15 +216,22 @@ class CMPC { public:
 		check_MAC<nP>(io, mac, key, value, Delta, cf->num_wire, party);
 #endif
 
+		// This is a commmitment scheme implemented in the latest version of the code. MAYBE,
+		// rest of the code looks different
+		// For each party it evaluates according to the paper the XOR. 
 		ands = 0;
 		for(int i = 0; i < cf->num_gate; ++i) {
 			if (cf->gates[4*i+3] == AND_GATE) {
-				x[party][ands] = value[cf->gates[4*i]] != ANDS_value[3*ands];
-				y[party][ands] = value[cf->gates[4*i+1]] != ANDS_value[3*ands+1];	
+				//  Uninitialized values
+				x[party][ands] = value[cf->gates[4*i]] != ANDS_value[3*ands]; // Same as XOR, but !=
+				y[party][ands] = value[cf->gates[4*i+1]] != ANDS_value[3*ands+1]; // Same as XOR, but !=
 				ands++;
 			}
 		}
 
+		
+
+		// Sharing the commitments and receiving the comitments.
 		vector<future<void>>	 res;
 		for(int i = 1; i <= nP; ++i) for(int j = 1; j <= nP; ++j) if( (i < j) and (i == party or j == party) ) {
 			int party2 = i + j - party;
@@ -198,8 +245,12 @@ class CMPC { public:
 				io->recv_data(party2, y[party2], num_ands);
 			}));
 		}
-		joinNclean(res);
+		joinNclean(res); // Waiting for threads to finish.
+
 		for(int i = 2; i <= nP; ++i) for(int j = 0; j < num_ands; ++j) {
+			// Again XORing with != instead of XOR.
+			// This is an agregation of the shares from all parties into the first party.
+			// This aims to check that the commitment works.
 			x[1][j] = x[1][j] != x[i][j];
 			y[1][j] = y[1][j] != y[i][j];
 		}
@@ -211,27 +262,27 @@ class CMPC { public:
 					sigma_mac[j][ands] = ANDS_mac[j][3*ands+2];
 					sigma_key[j][ands] = ANDS_key[j][3*ands+2];
 				}
-				sigma_value[ands] = ANDS_value[3*ands+2];
+				sigma_value[ands] = ANDS_value[3*ands+2];//c
 
 				if(x[1][ands]) {
 					for(int j = 1; j <= nP; ++j) {
-						sigma_mac[j][ands] = sigma_mac[j][ands] ^ ANDS_mac[j][3*ands+1];
+						sigma_mac[j][ands] = sigma_mac[j][ands] ^ ANDS_mac[j][3*ands+1]; 
 						sigma_key[j][ands] = sigma_key[j][ands] ^ ANDS_key[j][3*ands+1];
 					}
-					sigma_value[ands] = sigma_value[ands] != ANDS_value[3*ands+1];
+					sigma_value[ands] = sigma_value[ands] != ANDS_value[3*ands+1]; // c ^ b
 				}
 				if(y[1][ands]) {
 					for(int j = 1; j <= nP; ++j) {
 						sigma_mac[j][ands] = sigma_mac[j][ands] ^ ANDS_mac[j][3*ands];
 						sigma_key[j][ands] = sigma_key[j][ands] ^ ANDS_key[j][3*ands];
 					}
-					sigma_value[ands] = sigma_value[ands] != ANDS_value[3*ands];
+					sigma_value[ands] = sigma_value[ands] != ANDS_value[3*ands]; // c ^ a
 				}
 				if(x[1][ands] and y[1][ands]) {
 					if(party != 1)
 						sigma_key[1][ands] = sigma_key[1][ands] ^ Delta;
 					else
-						sigma_value[ands] = not sigma_value[ands];
+						sigma_value[ands] = not sigma_value[ands]; 
 				}
 				ands++;
 			}
@@ -248,6 +299,7 @@ class CMPC { public:
 		}
 #endif
 
+		// The garbling of the gates
 		ands = 0;
 		block H[4][nP+1];
 		block K[4][nP+1], M[4][nP+1];
@@ -272,7 +324,7 @@ class CMPC { public:
 				}
 				K[3][1] = K[3][1] ^ Delta;
 
-				Hash(H, labels[cf->gates[4*i]], labels[cf->gates[4*i+1]], ands);
+				Hash(H, labels[cf->gates[4*i]], labels[cf->gates[4*i+1]], ands); // computing the hashes
 				for(int j = 0; j < 4; ++j) {
 					for(int k = 1; k <= nP; ++k) if(k != party) {
 						H[j][k] = H[j][k] ^ M[j][k];
@@ -282,6 +334,7 @@ class CMPC { public:
 					if(r[j]) 
 						H[j][party] = H[j][party] ^ Delta;
 				}
+				// Sending information to P1
 				for(int j = 0; j < 4; ++j)
 					io->send_data(1, H[j]+1, sizeof(block)*(nP));
 				++ands;
@@ -328,6 +381,8 @@ class CMPC { public:
 	}
 
 	void online (bool * input, bool * output) {
+
+		// THIS IS THE Sending and receiving of data.
 		bool * mask_input = new bool[cf->num_wire];
 		for(int i = 0; i < num_in; ++i)
 			mask_input[i] = input[i] != value[i];
@@ -359,7 +414,8 @@ class CMPC { public:
 			joinNclean(res);
 			for(int i = 2; i <= nP; ++i) delete[] tmp[i];
 		}
-	
+
+		// This is again sending and receiving data from party 1.
 		if(party!= 1) {
 			for(int i = 0; i < num_in; ++i) {
 				block tmp = labels[i];
@@ -376,13 +432,15 @@ class CMPC { public:
 				}));
 			}
 			joinNclean(res);
-	
+
+			// This is the online processing phase
 			int ands = 0;	
 			for(int i = 0; i < cf->num_gate; ++i) {
 				if (cf->gates[4*i+3] == XOR_GATE) {
 					for(int j = 2; j<= nP; ++j)
 						eval_labels[j][cf->gates[4*i+2]] = eval_labels[j][cf->gates[4*i]] ^ eval_labels[j][cf->gates[4*i+1]];
 					mask_input[cf->gates[4*i+2]] = mask_input[cf->gates[4*i]] != mask_input[cf->gates[4*i+1]];
+					// Fast processing XOR gates
 				} else if (cf->gates[4*i+3] == AND_GATE) {
 					int index = 2*mask_input[cf->gates[4*i]] + mask_input[cf->gates[4*i+1]];
 					block H[nP+1];
@@ -453,7 +511,7 @@ class CMPC { public:
 			H[j][i] = H[j][0] ^ makeBlock(4*idx+j, i);
 		}
 		for(int j = 0; j < 4; ++j) {
-			prp.permute_block(H[j]+1, nP);
+			prp.permute_block(H[j]+1, nP); H[0][1] H[1][1] H[2][1] H[3][1]
 		}
 	}
 

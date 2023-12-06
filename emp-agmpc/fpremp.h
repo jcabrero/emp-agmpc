@@ -13,6 +13,7 @@ class FpreMP { public:
 	ThreadPool *pool;
 	int party;
 	NetIOMP<nP> * io;
+	// FPRE: It is producing a Multiparty Bit for the number of parties as template
 	ABitMP<nP>* abit;
 	block Delta;
 	CRH * prps;
@@ -25,6 +26,9 @@ class FpreMP { public:
 		this->pool = pool;
 		this->io = io[0];
 		this ->ssp = ssp;
+
+		// FPRE(1): When initialized, it is producing a Delta if nullptr
+		// Under the hood it is using the TinyOT protocol.
 		abit = new ABitMP<nP>(io[1], pool, party, _delta, ssp);
 		Delta = abit->Delta;
 		prps = new CRH[nP+1];
@@ -48,6 +52,7 @@ class FpreMP { public:
 	}
 	void compute(block * MAC[nP+1], block * KEY[nP+1], bool * r, int length) {
 		int64_t bucket_size = get_bucket_size(length);
+		// Reserving space for outputs
 		block * tMAC[nP+1];
 		block * tKEY[nP+1];
 		block * tKEYphi[nP+1];
